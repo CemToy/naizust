@@ -1,0 +1,24 @@
+name: Build Naizust for iPhone
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release
+        run: |
+          xcodebuild -version
+          xcodebuild -project Naizust.xcodeproj -target Naizust -configuration Release -sdk iphoneos CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/product" CODE_SIGNING_ALLOWED=NO build
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/package/Payload"
+          cp -R "$RUNNER_TEMP/product/Naizust.app" "$RUNNER_TEMP/package/Payload/"
+          cd "$RUNNER_TEMP/package"
+          zip -qry "$GITHUB_WORKSPACE/Naizust-unsigned.ipa" Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Naizust-unsigned
+          path: Naizust-unsigned.ipa
+          if-no-files-found: error
