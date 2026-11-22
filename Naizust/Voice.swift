@@ -65,6 +65,7 @@ import AVFoundation
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.requiresOnDeviceRecognition = true
             request.shouldReportPartialResults = true
+            request.addsPunctuation = true
             request.taskHint = .dictation
             self.request = request
             let epoch = UUID()
@@ -132,3 +133,4 @@ import AVFoundation
     }
     func silence() { player?.stop() }
 }
+
