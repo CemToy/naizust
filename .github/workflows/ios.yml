@@ -7,6 +7,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check word alignment
+        run: swiftc Naizust/PracticeData.swift Checks/main.swift -o "$RUNNER_TEMP/check" && "$RUNNER_TEMP/check"
       - name: Build release
         run: |
           xcodebuild -version
@@ -17,8 +19,18 @@ jobs:
           cp -R "$RUNNER_TEMP/product/Naizust.app" "$RUNNER_TEMP/package/Payload/"
           cd "$RUNNER_TEMP/package"
           zip -qry "$GITHUB_WORKSPACE/Naizust-unsigned.ipa" Payload
+      - name: Launch on iPhone simulator
+        run: |
+          device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for k,ds in sorted(json.load(sys.stdin)["devices"].items(),reverse=True) if "iOS-" in k and int(k.split("iOS-")[1].split("-")[0])>=26 for d in ds if d["name"].startswith("iPhone")))')
+          xcrun simctl boot "$device" || xcrun simctl bootstatus "$device" -b
+          xcodebuild -project Naizust.xcodeproj -target Naizust -configuration Debug -sdk iphonesimulator ARCHS=arm64 CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/sim" build
+          xcrun simctl bootstatus "$device" -b
+          xcrun simctl install "$device" "$RUNNER_TEMP/sim/Naizust.app"
+          xcrun simctl launch "$device" local.naizust.practice
       - uses: actions/upload-artifact@v4
         with:
           name: Naizust-unsigned
           path: Naizust-unsigned.ipa
           if-no-files-found: error
+
+

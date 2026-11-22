@@ -16,7 +16,7 @@ struct PracticeView: View {
     @State private var reading = ""
     @State private var hint = ""
     @State private var position = 0
-    @State private var anchor = 0
+    @State private var finishing = false
     @State private var shift = ""
     @State private var sourceWords: [String] = []
     @State private var chunks: [String] = []
@@ -57,8 +57,9 @@ struct PracticeView: View {
             if value == .background && page == .speak { voice.stop() }
         }
         .translationTask(translate) { session in
-            guard busy, page == .review else { return }
-            await analyze(session)
+            guard busy else { return }
+            if page == .edit { await suggest(session) }
+            else if page == .review { await analyze(session) }
         }
     }
     var title: String {
@@ -107,6 +108,14 @@ struct PracticeView: View {
                         Text("Попыток: \(item.attempts.count)").font(.caption)
                     }.frame(maxWidth: .infinity, alignment: .leading).padding().background(.white, in: RoundedRectangle(cornerRadius: 16))
                 }.buttonStyle(.plain)
+                .contextMenu {
+                    Button("Рассказать без чтения", systemImage: "mic") {
+                        piece = item; reading = item.body; launch()
+                    }
+                }
+                if !item.attempts.isEmpty {
+                    Button("Рассказать без чтения") { piece = item; reading = item.body; launch() }
+                }
             }
         }
     }
@@ -119,11 +128,18 @@ struct PracticeView: View {
                 Text("Ключевые мысли").font(.headline)
                 Text("По одной на строку. Если оставить пустым, приложение возьмёт предложения оригинала.").font(.footnote)
                 TextEditor(text: $piece.ideas).frame(minHeight: 90)
+                if busy { ProgressView("Выбираем ключевые мысли…") }
+                Button("Выделить основные мысли на iPhone") {
+                    guard MeaningReview.available else { problem = "Локальная модель Apple Intelligence недоступна. Введи свои ключевые мысли."; return }
+                    busy = true; problem = ""
+                    if MeaningReview.needsTranslation { requestTranslation() }
+                    else { Task { await suggest(nil) } }
+                }.disabled(busy || words(piece.body).isEmpty)
             }
             button("Сохранить и читать", "book") {
                 if piece.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { piece.title = String(piece.body.prefix(48)) }
                 if save() { reading = piece.body; history = false; page = .read }
-            }.disabled(words(piece.body).isEmpty)
+            }.disabled(busy || words(piece.body).isEmpty)
         }
     }
     var modePicker: some View {
@@ -170,7 +186,6 @@ struct PracticeView: View {
             hint = "Конец текста"; return
         }
         if hint.isEmpty {
-            anchor = position
             hint = piece.mode == .exact ? sourceWords[position] : "Вспомни мысль: " + words(chunks[i]).prefix(4).joined(separator: " ") + "…"
         } else { hint = chunks[i] }
         shift = voice.transcript
@@ -190,15 +205,18 @@ struct PracticeView: View {
             HStack {
                 Button(voice.active ? "Пауза" : "Продолжить") { if voice.active { voice.stop() } else { Task { await voice.start() } } }.disabled(voice.pending)
                 Spacer()
-                Button("Закончить рассказ") { finish() }
-            }.buttonStyle(.bordered)
+                Button(finishing ? "Завершаем…" : "Закончить рассказ") { Task { await finish() } }
+            }.buttonStyle(.bordered).disabled(finishing)
         }.onChange(of: voice.transcript) { _, text in
             position = nextPosition(source: sourceWords, speech: text, near: position)
             if !hint.isEmpty && text != shift { hint = "" }
         }
     }
-    func finish() {
-        voice.finish()
+    func finish() async {
+        guard !finishing else { return }
+        finishing = true
+        await voice.finish()
+        finishing = false
         attempt.transcript = voice.transcript; attempt.audio = voice.file?.lastPathComponent
         if !voice.issue.isEmpty { attempt.note = voice.issue }
         page = .review
@@ -225,14 +243,35 @@ struct PracticeView: View {
             }
             busy = true
             if MeaningReview.needsTranslation {
-                if translate == nil { translate = .init(source: .init(identifier: "ru"), target: .init(identifier: "en")) }
-                else { translate?.invalidate() }
+                requestTranslation()
             } else { Task { await analyze(nil) } }
         }
+    }
+    func suggest(_ session: TranslationSession?) async {
+        do {
+            let ideas = try await MeaningReview.outline(piece.body, translator: session)
+            if !ideas.isEmpty { piece.ideas = ideas }
+            else { problem = "Модель не выделила ключевые мысли. Можно вписать их вручную." }
+        } catch { problem = "Не удалось выделить мысли. " + error.localizedDescription }
+        busy = false
+    }
+    func requestTranslation() {
+        if translate == nil { translate = .init(source: .init(identifier: "ru"), target: .init(identifier: "en")) }
+        else { translate?.invalidate() }
     }
     func analyze(_ session: TranslationSession?) async {
         do {
             attempt.findings = try await MeaningReview.run(ideas: attempt.points ?? fragments(attempt.source), transcript: attempt.transcript, translator: session)
+            if words(attempt.transcript).map(key) == voice.timing.map({ key($0.word) }) {
+                let heard = words(attempt.transcript).map(key)
+                for i in attempt.findings.indices {
+                    let quote = words(attempt.findings[i].spoken).map(key)
+                    guard !quote.isEmpty, quote.count <= heard.count else { continue }
+                    if let n = (0...(heard.count-quote.count)).first(where: { heard[$0..<($0+quote.count)].elementsEqual(quote) }) {
+                        attempt.findings[i].second = voice.timing[n].time
+                    }
+                }
+            }
             attempt.note = session == nil ? "Проверено моделью на iPhone." : "Проверено на iPhone через локальный перевод на английский. Сверь спорные места с цитатами."
         } catch { attempt.note = "Смысловой разбор недоступен. Проверь доступность модели и языковых пакетов. " + error.localizedDescription }
         busy = false; persistAttempt()
@@ -241,6 +280,9 @@ struct PracticeView: View {
         Group {
             Text(attempt.mode.rawValue).font(.headline).foregroundStyle(green)
             if busy { ProgressView("Проверяем смысл на iPhone…") }
+            if let previous = piece.attempts.last(where: { $0.date < attempt.date && $0.source == attempt.source && $0.mode == attempt.mode }) {
+                Text("Подсказки за рассказ · раньше \(previous.hints.count), сейчас \(attempt.hints.count)").font(.subheadline)
+            }
             if !attempt.note.isEmpty { Text(attempt.note) }
             if let audio = attempt.audio {
                 HStack { Button("Слушать запись") { voice.listen(audio) }; Button("Остановить") { voice.silence() } }

@@ -106,7 +106,19 @@ import AVFoundation
         active = false
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
-    func finish() { stop(); recording = nil }
+    func finish() async {
+        if active {
+            engine.stop()
+            if installed { engine.inputNode.removeTap(onBus: 0); installed = false }
+            request?.endAudio()
+            for _ in 0..<25 where active {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        stop()
+        recording = nil
+        if issue.hasPrefix("Запись приостановлена") { issue = "" }
+    }
     func listen(_ filename: String, at second: Double = 0) {
         do {
             let session = AVAudioSession.sharedInstance()
